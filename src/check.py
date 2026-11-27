@@ -1,8 +1,13 @@
+# %%
+# 1. Imports and configuration
 import sys
 import re
 from pathlib import Path
 import pandas as pd
+import numpy as np
 
+# %%
+# 2. Load and prepare data
 SRC_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = SRC_DIR
 DATA_DIR = PROJECT_ROOT / "data"
@@ -25,6 +30,7 @@ def print_header(title: str):
     print(f"\n{'=' * 20}\n{title}\n{'=' * 20}")
 
 
+# %%
 def check_common(target: pd.DataFrame):
     print("[1] shape ", target.shape)
     print("\n[2] dtypes ", target.dtypes)
@@ -38,6 +44,10 @@ def check_common(target: pd.DataFrame):
         print(f"\n{target[target.isna().any(axis=1)].head()}")
 
 
+check_common(sample)
+
+
+# %%
 def check_structure(df: pd.DataFrame, title: str, value: str, list_standard: list):
     """Check whether IDs have consistent row counts."""
 
@@ -74,6 +84,7 @@ def check_structure(df: pd.DataFrame, title: str, value: str, list_standard: lis
             print("IDs have different numbers of rows.")
 
 
+# %%
 # train_target
 def check_train_target(train: pd.DataFrame):
     """train_target.csv structure.
@@ -119,41 +130,51 @@ def check_train_target(train: pd.DataFrame):
     print(f"\n{train[train["sample_id"] == first_id]}")
 
 
-# sample_submission
-def check_sample_submission(sample: pd.DataFrame):
-    print("not 0 prediction row num: ", (sample["prediction"] != 0.0).sum())
-    id_pattern = re.compile(r"(?P<id>t\d{5})_" r"(?P<name>[^_]+)_" r"h(?P<horizon>\d+)")
-    first_id = sample["id"].iloc[0]
-
-    print("Original ID:", repr(first_id))
-    print("Regex match:", id_pattern.match(first_id))
-
+# %%
+# split sample id and create a data frame
+def build_sample_id(sample: pd.DataFrame) -> pd.DataFrame:
+    id_pattern = re.compile(
+        r"(?P<sample_id>t\d{5})_" r"(?P<variable>[^_]+)_" r"h(?P<horizon>\d+)"
+    )
     id_sort = sample["id"].str.extract(id_pattern)
+    parsed = pd.concat([id_sort, sample["prediction"]], axis=1)
+    return parsed
 
-    print(id_sort.head())
+
+# %%
+# sample_submission
+def check_sample_id_structure(
+    sample: pd.DataFrame, parsed: pd.DataFrame
+) -> pd.DataFrame:
+    print("not 0 prediction row num: ", (sample["prediction"] != 0.0).sum())
+    first_id = sample["id"].iloc[0]
+    print("Original ID:", repr(first_id))
+    print("Regex match:", parsed.match(first_id))
 
     expected = (
-        id_sort[["name", "horizon"]]
+        parsed[["variable", "horizon"]]
         .drop_duplicates()
-        .sort_values(["name", "horizon"])
+        .sort_values(["variable", "horizon"])
         .reset_index(drop=True)
     )
-    structure_check = id_sort.groupby("id").apply(
-        lambda x: (x[["name", "horizon"]])
-        .sort_values(["name", "horizon"])
+    structure_check = parsed.groupby("sample_id").apply(
+        lambda x: (x[["variable", "horizon"]])
+        .sort_values(["variable", "horizon"])
         .reset_index(drop=True)
         .equals(expected)
     )
-    duplicate_count = id_sort.duplicated(["id", "name", "horizon"]).sum()
+    duplicate_count = parsed.duplicated(["sample_id", "variable", "horizon"]).sum()
 
     print("\nDuplicate combinations: ", duplicate_count)
     print("All IDs have the same structure: ", structure_check.all())
     print("IDs with different structure: ", (~structure_check).sum())
 
-    first_id = id_sort["id"].iloc[0]
-    print(f"\n{id_sort[id_sort["id"] == first_id]}")
+    first_id = parsed["sample_id"].iloc[0]
+    print(f"\n{parsed[parsed["sample_id"] == first_id]}")
+    return parsed
 
 
+# %%
 # case_metadata
 def fillna_meta(meta: pd.DataFrame) -> pd.DataFrame:
     print(f"caseid sample: {meta["caseid"].unique()[:5]}")
@@ -166,6 +187,7 @@ def fillna_meta(meta: pd.DataFrame) -> pd.DataFrame:
     return meta
 
 
+# %%
 def check_meta(meta: pd.DataFrame):
     """check which column contains other column between subjecid and caseid"""
     non_target_mask = (meta == 0.0).any(axis=1)
@@ -202,15 +224,25 @@ def check_meta(meta: pd.DataFrame):
     print("2) Consistent:", len(caseid_criteria))
 
 
+# %%
 def check_sturucture_fillna_test_parquet(test: pd.DataFrame):
     """check strucure and fill the missing values"""
     print("\n---structure---")
     sample_id = test["sample_id"].nunique()
     print("sample_id_cnt: ", sample_id)
-    sample_id_per_row = test.groupby("sample_id")["minute"].size().unique()
-    print("sample_id_per_row: ", sample_id_per_row)
+
+    each_sample_id_row_cnt = test.groupby("sample_id")["minute"].size().unique()
+    print("each_sample_id_row_cnt: ", each_sample_id_row_cnt)
+
+    each_sample_id_row = test.groupby("sample_id")["minute"].unique()
+    minute = sorted(each_sample_id_row.iloc[0].tolist(), reverse=True)
+    print("minute in each sample id", min(minute), "~", max(minute))
+
+    missing_minutes = sorted(set(range(min(minute), max(minute) + 1)) - set(minute))
+    print("missing_minutes:", missing_minutes)
 
     expected = test["minute"].drop_duplicates().sort_values().reset_index(drop=True)
+
     structure_check = test.groupby("sample_id")["minute"].apply(
         lambda x: (
             x.drop_duplicates().sort_values().reset_index(drop=True).equals(expected)
@@ -225,13 +257,40 @@ def check_sturucture_fillna_test_parquet(test: pd.DataFrame):
     print("\n---missing_per_id---")
     SIGNALS = ["HR", "MBP", "SPO2"]
     missing_per_id = test.groupby("sample_id")[SIGNALS].apply(lambda g: g.isna().sum())
-    print((missing_per_id > 0).sum())  # windows with any gap, per signal
-    print((missing_per_id == 30).sum())  # windows where a signal is entirely missing
+    print(
+        "missing_per_id > 0 :\n", (missing_per_id > 0).sum()
+    )  # windows with any gap, per signal
+    print(
+        "missing_per_id == 30 :\n", (missing_per_id == 30).sum()
+    )  # windows where a signal is entirely missing
 
     print(missing_per_id.loc[(missing_per_id != 0).sum(axis=1).eq(1)])
     print(missing_per_id.loc[(missing_per_id != 0).sum(axis=1).ge(2)])
 
 
+check_sturucture_fillna_test_parquet(train_parquet)
+
+
+# %%
+def check_id_name(sample: pd.DataFrame, parquet: pd.DataFrame):
+    sample_id = sample["sample_id"].unique()
+    parquet_id = parquet["sample_id"].unique()
+
+    sample_only = np.setdiff1d(sample_id, parquet_id)
+    parquet_only = np.setdiff1d(parquet_id, sample_id)
+
+    if len(sample_only) == 0 and len(parquet_only) == 0:
+        print("Both files have the same IDs.")
+    else:
+        print("The IDs are different.")
+        print("IDs only in sample:", len(sample_only), "/", len(sample_id))
+        print(sample_only[:10])
+        print("IDs only in parquet:", len(parquet_only), "/", len(parquet_id))
+        print(parquet_only[:10])
+
+
+check_id_name(build_sample_id(sample), train_parquet)
+# %%
 if __name__ == "__main__":
     # print_header("train")
     # check_common(train)
