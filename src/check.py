@@ -11,13 +11,16 @@ import numpy as np
 SRC_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = SRC_DIR
 DATA_DIR = PROJECT_ROOT / "data"
-ROW_DATA = DATA_DIR / "raw"
+ROW = DATA_DIR / "raw"
+PROCESS = DATA_DIR / "process"
 
-TRAIN = ROW_DATA / "train_target.csv"
-SAMPLE = ROW_DATA / "sample_submission.csv"
-META = ROW_DATA / "case_metadata.csv"
-TEST = ROW_DATA / "test_input.parquet"
-TRAIN_INPUT = ROW_DATA / "train_input.parquet"
+TRAIN = ROW / "train_target.csv"
+SAMPLE = ROW / "sample_submission.csv"
+META = ROW / "case_metadata.csv"
+TEST = ROW / "test_input.parquet"
+TRAIN_INPUT = ROW / "train_input.parquet"
+SAVE = PROCESS / "sample_submission_id.csv"
+SAVE_META = PROCESS / "meta_fillna.csv"
 
 train = pd.read_csv(TRAIN)
 sample = pd.read_csv(SAMPLE)
@@ -26,16 +29,12 @@ test_parquet = pd.read_parquet(TEST)
 train_parquet = pd.read_parquet(TRAIN_INPUT)
 
 
-def print_header(title: str):
-    print(f"\n{'=' * 20}\n{title}\n{'=' * 20}")
-
-
 # %%
-def check_common(target: pd.DataFrame):
+def report_common(target: pd.DataFrame):
     print("[1] shape ", target.shape)
     print("\n[2] dtypes ", target.dtypes)
     print("\n[3] info ", target.info())
-    print(f"\n[4] head {target.head()}")
+    print(f"\n[4] head \n{target.head()}")
 
     print("\n---null---")
     isna = target.isna().sum()
@@ -44,49 +43,12 @@ def check_common(target: pd.DataFrame):
         print(f"\n{target[target.isna().any(axis=1)].head()}")
 
 
-check_common(sample)
-
-
-# %%
-def check_structure(df: pd.DataFrame, title: str, value: str, list_standard: list):
-    """Check whether IDs have consistent row counts."""
-
-    print(f"<check {title} structure>")
-
-    # Summary statistics
-    val = df[value].agg(
-        min="min",
-        max="max",
-        mean="mean",
-        mode=lambda x: x.mode().iloc[0],
-        std="std",
-        missing=lambda x: x.isna().sum(),
-    )
-
-    print("\n---val---")
-    print(val)
-
-    for standard in list_standard:
-        print(f"\n---{standard}---")
-
-        # Exclude missing IDs and placeholder IDs (0.0)
-        target = df.loc[df[standard].notna() & (df[standard] != 0.0)]
-
-        sample_counts = target.groupby(standard).size()
-
-        print(f"Number of unique IDs: {len(sample_counts)}")
-        print(f"Maximum rows per ID: {sample_counts.max()}")
-        print(f"Minimum rows per ID: {sample_counts.min()}")
-
-        if sample_counts.nunique() == 1:
-            print("All IDs have the same number of rows.")
-        else:
-            print("IDs have different numbers of rows.")
+report_common(sample)
 
 
 # %%
 # train_target
-def check_train_target(train: pd.DataFrame):
+def report_train_target(train: pd.DataFrame):
     """train_target.csv structure.
     check whether all IDs have the same number of rows
     check whether all IDs have the same structure"""
@@ -143,7 +105,7 @@ def build_sample_id(sample: pd.DataFrame) -> pd.DataFrame:
 
 # %%
 # sample_submission
-def check_sample_id_structure(
+def report_sample_id_structure(
     sample: pd.DataFrame, parsed: pd.DataFrame
 ) -> pd.DataFrame:
     print("not 0 prediction row num: ", (sample["prediction"] != 0.0).sum())
@@ -188,7 +150,7 @@ def fillna_meta(meta: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
-def check_meta(meta: pd.DataFrame):
+def report_meta(meta: pd.DataFrame):
     """check which column contains other column between subjecid and caseid"""
     non_target_mask = (meta == 0.0).any(axis=1)
     target = meta.loc[~non_target_mask]
@@ -222,6 +184,9 @@ def check_meta(meta: pd.DataFrame):
     print("\n--Whether each caseid meets the criteria--")
     print("1) Inconsistent:", len(caseid_not_criteria))
     print("2) Consistent:", len(caseid_criteria))
+
+
+check_meta(meta)
 
 
 # %%
@@ -289,31 +254,10 @@ def check_id_name(sample: pd.DataFrame, parquet: pd.DataFrame):
         print(parquet_only[:10])
 
 
-check_id_name(build_sample_id(sample), train_parquet)
+check_id_name(meta, test_parquet)
 # %%
 if __name__ == "__main__":
-    # print_header("train")
-    # check_common(train)
-    # check_structure(train, "train", "value", ["sample_id"])
-    # check_train_target(train)
+    build_sample_id(sample).to_csv(SAVE, index=False)
+    fillna_meta(meta).to_csv(SAVE_META, index=False)
 
-    # print_header("sample")
-    # check_common(sample)
-    # print()
-    # check_sample_submission(sample)
-
-    # print_header("meta")
-    # check_common(meta)
-    # fillna_meta(meta)
-    # check_structure(meta, "meta", "age", ["sample_id", "caseid", "subjectid"])
-    # check_meta(meta)
-
-    print_header("test_parquet")
-    check_common(test_parquet)
-    print()
-    check_sturucture_fillna_test_parquet(test_parquet)
-
-    # print_header("train_parquet")
-    # check_common(train_parquet)
-    # print()
-    # check_sturucture_fillna_test_parquet(train_parquet)
+# %%
