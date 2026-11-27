@@ -43,7 +43,7 @@ def report_common(target: pd.DataFrame):
         print(f"\n{target[target.isna().any(axis=1)].head()}")
 
 
-report_common(sample)
+report_common(train_parquet)
 
 
 # %%
@@ -101,6 +101,23 @@ def build_sample_id(sample: pd.DataFrame) -> pd.DataFrame:
     id_sort = sample["id"].str.extract(id_pattern)
     parsed = pd.concat([id_sort, sample["prediction"]], axis=1)
     return parsed
+
+
+# %%
+ID_PATTERN = r"c(?P<caseid>\d+)_o(?P<end>\d+)"
+
+
+def build_meta_sample_id(target: pd.DataFrame) -> pd.DataFrame:
+    key = target["sample_id"].str.extract(ID_PATTERN)
+    parsed = pd.concat([target, key], axis=1)
+    return parsed
+
+
+build_meta_sample_id(train_parquet)
+build_train_parquet = build_meta_sample_id(train_parquet)
+build_train_parquet.to_csv(
+    PROCESS / "train_input_extract_caseid.csv", index=False, encoding="utf-8-sig"
+)
 
 
 # %%
@@ -173,7 +190,7 @@ def report_meta(meta: pd.DataFrame):
         .sort_values(["subjectid", "caseid"])
     )
 
-    print(result)
+    print(result.to_string(index=False))
     print("2) No caseids :", no_caseids.count())
 
     unique_counts = target.groupby("caseid").nunique().drop(columns="sample_id")
@@ -185,8 +202,27 @@ def report_meta(meta: pd.DataFrame):
     print("1) Inconsistent:", len(caseid_not_criteria))
     print("2) Consistent:", len(caseid_criteria))
 
+    print("\n---sample_id---")
+    caseid = target.loc[target["sample_id"].str.startswith("c", na=False)]
 
-check_meta(meta)
+    print("\n1) caseid")
+    print(caseid.head())
+    print("Missing values:")
+    print(caseid.isna().sum())
+
+    subjectid = target.loc[target["sample_id"].str.startswith("t", na=False)]
+    print("\n2) subjectid")
+    print(subjectid.head())
+    print("Missing values:")
+    print(subjectid.isna().sum())
+
+    print("caseid rows:", len(caseid))
+    print("subjectid rows:", len(subjectid))
+    print("Total rows:", len(target))
+    print("Unclassified rows:", len(target) - len(caseid) - len(subjectid))
+
+
+report_meta(meta)
 
 
 # %%
