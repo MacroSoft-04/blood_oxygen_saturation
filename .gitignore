@@ -1,5 +1,5 @@
 .venv/
 .env
 .vscode/
-data/raw/*
-!data/raw/README.md
+data/*
+!data/README.md
