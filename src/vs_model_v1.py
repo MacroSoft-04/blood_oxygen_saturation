@@ -10,22 +10,21 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import font_manager
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.model_selection import GroupKFold
-from check import parse_submission_id  # add to the imports at the top
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RAW_DIR = PROJECT_ROOT / "data" / "raw"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+from common import (
+    META,
+    OUTPUT_DIR,
+    SAMPLE_SUBMISSION,
+    SIGNALS,
+    TEST_INPUT,
+    TRAIN_INPUT,
+    TRAIN_TARGET,
+    parse_submission_id,
+    set_korean_font,
+)
 
-TRAIN_INPUT = RAW_DIR / "train_input.parquet"
-TRAIN_TARGET = RAW_DIR / "train_target.csv"
-TEST_INPUT = RAW_DIR / "test_input.parquet"
-META = RAW_DIR / "case_metadata.csv"
-SAMPLE_SUBMISSION = RAW_DIR / "sample_submission.csv"
-
-SIGNALS = ["HR", "MBP", "SPO2"]
 LOOKBACKS = [5, 10, 30]
 N_SPLITS = 5
 SEED = 42
@@ -195,21 +194,6 @@ def fit_and_predict(
 
 
 # %%
-def set_korean_font() -> None:
-    available = {f.name for f in font_manager.fontManager.ttflist}
-    for name in [
-        "Malgun Gothic",
-        "AppleGothic",
-        "NanumGothic",
-        "Noto Sans CJK KR",
-        "Noto Sans CJK JP",
-    ]:
-        if name in available:
-            plt.rcParams["font.family"] = name
-            break
-    plt.rcParams["axes.unicode_minus"] = False
-
-
 # %%
 def plot_cv_result(result: pd.DataFrame, path: Path) -> None:
     set_korean_font()
@@ -269,6 +253,11 @@ def main() -> None:
         f"\nOverall MAE  persistence={result['persistence_mae'].mean():.3f}  "
         f"model={result['model_mae'].mean():.3f}"
     )
+    mbp = result[result["variable"] == "MBP"]
+    print(
+        f"MBP MAE      persistence={mbp['persistence_mae'].mean():.3f}  "
+        f"model={mbp['model_mae'].mean():.3f}"
+    )
     result.to_csv(OUTPUT_DIR / "cv_result_v1.csv", index=False)
     plot_cv_result(result, OUTPUT_DIR / "cv_result_v1.png")
 
@@ -277,10 +266,18 @@ def main() -> None:
         return
 
     test_features = build_features(pd.read_parquet(TEST_INPUT), meta)
-    fallback = target.groupby("variable")["value"].median().to_dict()
-    submission = fit_and_predict(train_features, target, test_features, fallback)
-
     sample = pd.read_csv(SAMPLE_SUBMISSION)
+
+    # The submission file, not train_target, defines what gets scored (MBP only).
+    scored = parse_submission_id(sample)[["variable", "horizon"]].drop_duplicates()
+    submit_target = target.merge(scored, on=["variable", "horizon"])
+    print(
+        "Scored (variable, horizon):", list(scored.itertuples(index=False, name=None))
+    )
+
+    fallback = target.groupby("variable")["value"].median().to_dict()
+    submission = fit_and_predict(train_features, submit_target, test_features, fallback)
+
     ours, official = set(submission["id"]), set(sample["id"])
     if ours != official:
         only_ours, only_official = sorted(ours - official), sorted(official - ours)

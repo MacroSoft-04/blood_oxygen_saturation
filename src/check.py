@@ -1,439 +1,423 @@
-"""Data checks for every raw file, plus the cross-file checks the model relies on.
-
-Run as a script to print the full report and write the small processed files that
-other scripts use. Each `# %%` cell can also be run on its own in the interactive window.
-"""
-
 # %%
+# 1. Imports and configuration
 import re
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-PROCESS_DIR = DATA_DIR / "process"
+from common import (
+    META,
+    PROCESS,
+    SAMPLE_SUBMISSION,
+    SIGNALS,
+    TEST_INPUT,
+    TRAIN_INPUT,
+    TRAIN_TARGET,
+)
 
-TRAIN_TARGET = RAW_DIR / "train_target.csv"
-TRAIN_INPUT = RAW_DIR / "train_input.parquet"
-TEST_INPUT = RAW_DIR / "test_input.parquet"
-META = RAW_DIR / "case_metadata.csv"
-SAMPLE_SUBMISSION = RAW_DIR / "sample_submission.csv"
+SAVE = PROCESS / "sample_submission_id.csv"
+SAVE_META = PROCESS / "meta_fillna.csv"
 
-SAVE_SUBMISSION_ID = PROCESS_DIR / "sample_submission_id.csv"
-SAVE_META = PROCESS_DIR / "meta_split.csv"
+# %%
+# 2. Load and prepare data
+train = pd.read_csv(TRAIN_TARGET)
+sample = pd.read_csv(SAMPLE_SUBMISSION)
+meta = pd.read_csv(META)
+test_parquet = pd.read_parquet(TEST_INPUT)
+train_parquet = pd.read_parquet(TRAIN_INPUT)
 
-SIGNALS = ["HR", "MBP", "SPO2"]
-TRAIN_ID_PATTERN = re.compile(r"c(?P<caseid>\d+)_o(?P<end>\d+)")
-SUBMISSION_ID_PATTERN = re.compile(
-    r"(?P<sample_id>t\d{5})_(?P<variable>[^_]+)_h(?P<horizon>\d+)"
+
+def print_header(title: str):
+    print(f"\n{'=' * 20}\n{title}\n{'=' * 20}")
+
+
+# %%
+def report_common(target: pd.DataFrame):
+    print("[1] shape ", target.shape)
+    print("\n[2] dtypes ", target.dtypes)
+    # info() prints by itself and returns None, so it is not wrapped in print().
+    print("\n[3] info ")
+    target.info()
+    print(f"\n[4] head \n{target.head()}")
+
+    print("\n---null---")
+    isna = target.isna().sum()
+    print(isna)
+    if (isna != 0).any():
+        print(f"\n{target[target.isna().any(axis=1)].head()}")
+
+
+# %%
+# train_target
+def report_train_target(train: pd.DataFrame):
+    """train_target.csv structure.
+    check whether all IDs have the same number of rows
+    check whether all IDs have the same structure"""
+    print("---col---")
+    print(f"sample_id_cnt: {train["sample_id"].nunique()}")
+    print(f"variable: {list(train["variable"].drop_duplicates())}")
+    print(f"horizon: {list(train["horizon"].drop_duplicates())}")
+
+    print("\n---horizon_value---")
+    horizon_counts = (
+        train.groupby(["sample_id", "horizon"]).size().unstack(fill_value=0)
+    )
+    count_check = horizon_counts.eq(horizon_counts.iloc[0]).all(axis=1)
+    print("All IDs have the same horizon counts:", count_check.all())
+
+    variable_counts = (
+        train.groupby(["horizon", "variable"]).size().unstack(fill_value=0)
+    )
+    count_check = variable_counts.eq(variable_counts.iloc[0]).all(axis=1)
+    print("Every horizon have the same variable counts:", count_check.all())
+
+    expected = (
+        train[["horizon", "variable"]]
+        .drop_duplicates()
+        .sort_values(["horizon", "variable"])
+        .reset_index(drop=True)
+    )
+    structure_check = train.groupby("sample_id").apply(
+        lambda x: (x[["horizon", "variable"]])
+        .sort_values(["horizon", "variable"])
+        .reset_index(drop=True)
+        .equals(expected)
+    )
+    duplicate_count = train.duplicated(["sample_id", "horizon", "variable"]).sum()
+
+    print("\nDuplicate combinations: ", duplicate_count)
+    print("All IDs have the same structure: ", structure_check.all())
+    print("IDs with different structure: ", (~structure_check).sum())
+
+    first_id = train["sample_id"].iloc[0]
+    print(f"\n{train[train["sample_id"] == first_id]}")
+
+    print("\n---value by variable---")
+    print(train.groupby("variable")["value"].describe().round(1))
+
+
+# %%
+# split sample id and create a data frame
+ID_PATTERN_SAMPLE = re.compile(
+    r"(?P<sample_id>t\d{5})_" r"(?P<variable>[^_]+)_" r"h(?P<horizon>\d+)"
 )
 
 
-def load_raw() -> dict[str, pd.DataFrame]:
-    return {
-        "train_target": pd.read_csv(TRAIN_TARGET),
-        "train_input": pd.read_parquet(TRAIN_INPUT),
-        "test_input": pd.read_parquet(TEST_INPUT),
-        "meta": pd.read_csv(META),
-        "sample": pd.read_csv(SAMPLE_SUBMISSION),
-    }
-
-
-def print_header(title: str) -> None:
-    print(f"\n{'=' * 60}\n{title}\n{'=' * 60}")
-
-
-def print_section(title: str) -> None:
-    print(f"\n--- {title} ---")
+def build_sample_id(sample: pd.DataFrame) -> pd.DataFrame:
+    id_sort = sample["id"].str.extract(ID_PATTERN_SAMPLE)
+    parsed = pd.concat([id_sort, sample["prediction"]], axis=1)
+    return parsed
 
 
 # %%
-# Parsing helpers
-def parse_submission_id(sample: pd.DataFrame) -> pd.DataFrame:
-    parsed = sample["id"].str.extract(SUBMISSION_ID_PATTERN)
-    parsed["horizon"] = parsed["horizon"].astype(int)
-    return pd.concat([parsed, sample["prediction"]], axis=1)
+ID_PATTERN = r"c(?P<caseid>\d+)_o(?P<end>\d+)"
 
 
-def add_split(meta: pd.DataFrame) -> pd.DataFrame:
-    # Test rows have caseid/subjectid hidden, so the ID prefix is the reliable split marker.
+def build_meta_sample_id(target: pd.DataFrame) -> pd.DataFrame:
+    key = target["sample_id"].str.extract(ID_PATTERN)
+    parsed = pd.concat([target, key], axis=1)
+    return parsed
+
+
+# %%
+# sample_submission
+def report_sample_id_structure(
+    sample: pd.DataFrame, parsed: pd.DataFrame
+) -> pd.DataFrame:
+    print("not 0 prediction row num: ", (sample["prediction"] != 0.0).sum())
+    first_id = sample["id"].iloc[0]
+    print("Original ID:", repr(first_id))
+    print("Regex match:", ID_PATTERN_SAMPLE.match(first_id))
+    print("IDs not matching the pattern:", parsed["sample_id"].isna().sum())
+
+    expected = (
+        parsed[["variable", "horizon"]]
+        .drop_duplicates()
+        .sort_values(["variable", "horizon"])
+        .reset_index(drop=True)
+    )
+    structure_check = parsed.groupby("sample_id").apply(
+        lambda x: (x[["variable", "horizon"]])
+        .sort_values(["variable", "horizon"])
+        .reset_index(drop=True)
+        .equals(expected)
+    )
+    duplicate_count = parsed.duplicated(["sample_id", "variable", "horizon"]).sum()
+
+    print("\nDuplicate combinations: ", duplicate_count)
+    print("All IDs have the same structure: ", structure_check.all())
+    print("IDs with different structure: ", (~structure_check).sum())
+    print("Variables to predict:", list(parsed["variable"].drop_duplicates()))
+
+    first_id = parsed["sample_id"].iloc[0]
+    print(f"\n{parsed[parsed["sample_id"] == first_id]}")
+    return parsed
+
+
+# %%
+# case_metadata
+def fillna_meta(meta: pd.DataFrame) -> pd.DataFrame:
+    print(f"caseid sample: {meta["caseid"].unique()[:5]}")
+    print(f"subjectid sample: {meta["subjectid"].unique()[:5]}")
+
+    # Work on a copy so the global `meta` keeps its NaN for other checks.
     meta = meta.copy()
-    meta["split"] = meta["sample_id"].str[0].map({"c": "train", "t": "test"})
+    meta["caseid"] = meta["caseid"].fillna(0.0)
+    meta["subjectid"] = meta["subjectid"].fillna(0.0)
+    fillna_check = meta[(meta["caseid"] == 0.0) & (meta["subjectid"] == 0.0)]
+    print()
+    fillna_check.info()
     return meta
 
 
-def add_case_clock(inp: pd.DataFrame) -> pd.DataFrame:
-    """Attach caseid and the case-level minute (`t`) to train input rows.
-
-    Assumes o### in the sample_id is the case minute of the window's last row (minute 0).
-    """
-    key = inp["sample_id"].str.extract(TRAIN_ID_PATTERN).astype(int)
-    return inp.assign(
-        caseid=key["caseid"], end=key["end"], t=key["end"] + inp["minute"]
-    )
-
-
 # %%
-# 1. Common report for any table
-def report_common(df: pd.DataFrame) -> None:
-    print("shape:", df.shape)
-    print_section("dtypes")
-    print(df.dtypes.to_string())
-    print_section("head")
-    print(df.head().to_string(index=False))
+def report_meta(meta: pd.DataFrame):
+    """check which column contains other column between subjecid and caseid
+    `meta` is expected to come from fillna_meta (0.0 = hidden test IDs)."""
+    non_target_mask = (meta == 0.0).any(axis=1)
+    target = meta.loc[~non_target_mask]
 
-    print_section("nulls")
-    nulls = df.isna().sum()
-    print(nulls.to_string())
-    if nulls.any():
-        print("\nRows with any null (first 5):")
-        print(df[df.isna().any(axis=1)].head().to_string(index=False))
+    caseid_num = target.groupby("subjectid")["caseid"].nunique()
 
+    multiple_caseids = caseid_num[caseid_num > 1]
+    no_caseids = caseid_num[caseid_num == 0]
 
-# %%
-# 2. Input windows (train_input / test_input)
-def report_input(inp: pd.DataFrame) -> None:
-    print_section("window structure")
-    rows_per_id = inp.groupby("sample_id").size()
-    print("windows:", len(rows_per_id))
-    print("rows per window:", sorted(rows_per_id.unique().tolist()))
+    print("\n--Each of subjectid--")
+    print("1) Multiple caseids :", multiple_caseids.count(), multiple_caseids.unique())
+    sample_mask = target["subjectid"].isin(multiple_caseids.index)
 
-    minutes = np.sort(inp["minute"].unique())
-    print(f"minute range: {minutes.min()} ~ {minutes.max()}")
-    full_range = set(range(minutes.min(), minutes.max() + 1))
-    print("minutes missing from the range:", sorted(full_range - set(minutes)))
-
-    # Same set of minutes in every window <=> each window has exactly one row per minute.
-    minute_grid = pd.crosstab(inp["sample_id"], inp["minute"])
-    print(
-        "duplicate (sample_id, minute):", inp.duplicated(["sample_id", "minute"]).sum()
-    )
-    print("all windows share the same minutes:", bool((minute_grid == 1).all().all()))
-
-    print_section("signal values")
-    print(inp[SIGNALS].describe().round(1).to_string())
-
-    print_section("missing values per window")
-    missing_per_id = inp[SIGNALS].isna().groupby(inp["sample_id"]).sum()
-    window_len = rows_per_id.max()
-    summary = pd.DataFrame(
-        {
-            "missing_row_ratio": inp[SIGNALS].isna().mean().round(4),
-            "windows_with_any_gap": (missing_per_id > 0).sum(),
-            "windows_fully_missing": (missing_per_id == window_len).sum(),
-            # The last row is what persistence and most features lean on.
-            "windows_missing_last_minute": inp.loc[
-                inp["minute"] == minutes.max(), SIGNALS
-            ]
-            .isna()
-            .sum(),
-        }
-    )
-    print(summary.to_string())
-
-    n_signals_with_gap = (missing_per_id > 0).sum(axis=1)
-    print("\nwindows by number of signals with a gap:")
-    print(n_signals_with_gap.value_counts().sort_index().to_string())
-
-
-# %%
-# 3. train_target
-def report_target(target: pd.DataFrame) -> None:
-    print_section("structure")
-    print("windows:", target["sample_id"].nunique())
-    print("variables:", sorted(target["variable"].unique().tolist()))
-    print("horizons:", sorted(target["horizon"].unique().tolist()))
-
-    combos = pd.crosstab(target["sample_id"], [target["variable"], target["horizon"]])
-    print("rows per window:", sorted(combos.sum(axis=1).unique().tolist()))
-    print(
-        "duplicate (sample_id, variable, horizon):",
-        target.duplicated(["sample_id", "variable", "horizon"]).sum(),
-    )
-    print(
-        "every window has each (variable, horizon) exactly once:",
-        bool((combos == 1).all().all()),
-    )
-
-    print_section("value by variable")
-    print(target.groupby("variable")["value"].describe().round(1).to_string())
-
-    print_section("value by variable and horizon (mean)")
-    print(
-        target.pivot_table(
-            index="variable", columns="horizon", values="value", aggfunc="mean"
-        )
-        .round(2)
-        .to_string()
-    )
-
-
-# %%
-# 4. sample_submission
-def report_submission(sample: pd.DataFrame) -> None:
-    parsed = parse_submission_id(sample)
-
-    print_section("id format")
-    print("ids not matching the pattern:", parsed["sample_id"].isna().sum())
-    print("non-zero predictions:", (sample["prediction"] != 0).sum())
-
-    print_section("structure")
-    print("windows:", parsed["sample_id"].nunique())
-    combos = pd.crosstab(parsed["sample_id"], [parsed["variable"], parsed["horizon"]])
-    print("variables:", sorted(parsed["variable"].unique().tolist()))
-    print("horizons:", sorted(parsed["horizon"].unique().tolist()))
-    print("duplicate ids:", sample["id"].duplicated().sum())
-    print(
-        "every window has each (variable, horizon) exactly once:",
-        bool((combos == 1).all().all()),
-    )
-
-
-# %%
-# 5. case_metadata
-def report_meta(meta: pd.DataFrame) -> None:
-    meta = add_split(meta)
-
-    print_section("split")
-    print(meta["split"].value_counts(dropna=False).to_string())
-    print("unclassified rows:", meta["split"].isna().sum())
-    print(
-        "test rows with caseid/subjectid present:",
-        meta.loc[meta["split"] == "test", ["caseid", "subjectid"]]
-        .notna()
-        .any(axis=1)
-        .sum(),
-    )
-    print(
-        "train rows with caseid/subjectid missing:",
-        meta.loc[meta["split"] == "train", ["caseid", "subjectid"]]
-        .isna()
-        .any(axis=1)
-        .sum(),
-    )
-
-    train_meta = meta[meta["split"] == "train"]
-
-    print_section("caseid vs sample_id")
-    id_case = (
-        train_meta["sample_id"].str.extract(TRAIN_ID_PATTERN)["caseid"].astype(float)
-    )
-    print(
-        "sample_id prefix matches caseid column:",
-        bool((id_case == train_meta["caseid"]).all()),
-    )
-
-    print_section("subject / case relationship")
-    print(
-        "cases:",
-        train_meta["caseid"].nunique(),
-        " subjects:",
-        train_meta["subjectid"].nunique(),
-    )
-    subjects_per_case = train_meta.groupby("caseid")["subjectid"].nunique()
-    print("cases linked to more than one subject:", (subjects_per_case > 1).sum())
-    cases_per_subject = train_meta.groupby("subjectid")["caseid"].nunique()
-    print("cases per subject:")
-    print(cases_per_subject.value_counts().sort_index().to_string())
-    multi = cases_per_subject[cases_per_subject > 1].index
-    print("\nsubjects with multiple cases:")
-    print(
-        train_meta.loc[train_meta["subjectid"].isin(multi), ["subjectid", "caseid"]]
+    result = (
+        target.loc[
+            sample_mask,
+            ["subjectid", "caseid"],
+        ]
         .drop_duplicates()
         .sort_values(["subjectid", "caseid"])
-        .to_string(index=False)
     )
 
-    print_section("windows per case / subject")
-    print(train_meta.groupby("caseid").size().describe().round(1).to_string())
-    print()
-    print(train_meta.groupby("subjectid").size().describe().round(1).to_string())
+    print(result.to_string(index=False))
+    print("2) No caseids :", no_caseids.count())
 
-    print_section("attributes constant within a case")
-    varying = train_meta.groupby("caseid")[["age", "sex", "department"]].nunique().gt(1)
-    print(varying.sum().to_string())
+    unique_counts = target.groupby("caseid").nunique().drop(columns="sample_id")
 
-    print_section("age values")
+    caseid_not_criteria = unique_counts[(unique_counts > 1).any(axis=1)]
+    caseid_criteria = unique_counts[(unique_counts == 1).all(axis=1)]
+
+    print("\n--Whether each caseid meets the criteria--")
+    print("1) Inconsistent:", len(caseid_not_criteria))
+    print("2) Consistent:", len(caseid_criteria))
+
+    print("\n---sample_id---")
+    # Use the full meta here: test rows are exactly the ones the 0.0 mask removed above.
+    caseid = meta.loc[meta["sample_id"].str.startswith("c", na=False)]
+
+    print("\n1) caseid")
+    print(caseid.head())
+    print("Missing values:")
+    print(caseid.isna().sum())
+
+    subjectid = meta.loc[meta["sample_id"].str.startswith("t", na=False)]
+    print("\n2) subjectid")
+    print(subjectid.head())
+    print("Missing values:")
+    print(subjectid.isna().sum())
+
+    print("caseid rows:", len(caseid))
+    print("subjectid rows:", len(subjectid))
+    print("Total rows:", len(meta))
+    print("Unclassified rows:", len(meta) - len(caseid) - len(subjectid))
+
+    print("\n---age---")
     # All values on a 5-year grid would mean age is binned, not exact.
-    print("all ages multiples of 5:", bool((meta["age"] % 5 == 0).all()))
-    print(meta["age"].value_counts().sort_index().to_string())
+    print("All ages multiples of 5:", (meta["age"] % 5 == 0).all())
 
 
 # %%
-# 6. IDs line up across files
-def compare_ids(name_a: str, ids_a, name_b: str, ids_b) -> None:
-    a, b = set(ids_a), set(ids_b)
-    status = "same" if a == b else "DIFFERENT"
-    print(f"{name_a} ({len(a)}) vs {name_b} ({len(b)}): {status}")
-    if a != b:
-        print(f"  only in {name_a}: {len(a - b)}  e.g. {sorted(a - b)[:5]}")
-        print(f"  only in {name_b}: {len(b - a)}  e.g. {sorted(b - a)[:5]}")
+def check_structure_parquet(test: pd.DataFrame):
+    """check structure and missing values of train_input / test_input"""
+    print("\n---structure---")
+    sample_id = test["sample_id"].nunique()
+    print("sample_id_cnt: ", sample_id)
 
+    each_sample_id_row_cnt = test.groupby("sample_id")["minute"].size().unique()
+    print("each_sample_id_row_cnt: ", each_sample_id_row_cnt.tolist())
 
-def report_id_consistency(data: dict[str, pd.DataFrame]) -> None:
-    meta = add_split(data["meta"])
-    submission_ids = parse_submission_id(data["sample"])["sample_id"]
+    each_sample_id_row = test.groupby("sample_id")["minute"].unique()
+    minute = sorted(each_sample_id_row.iloc[0].tolist(), reverse=True)
+    print("minute in each sample id", min(minute), "~", max(minute))
 
-    print_section("train")
-    compare_ids(
-        "train_input",
-        data["train_input"]["sample_id"],
-        "train_target",
-        data["train_target"]["sample_id"],
-    )
-    compare_ids(
-        "train_input",
-        data["train_input"]["sample_id"],
-        "meta(train)",
-        meta.loc[meta["split"] == "train", "sample_id"],
-    )
+    missing_minutes = sorted(set(range(min(minute), max(minute) + 1)) - set(minute))
+    print("missing_minutes:", missing_minutes)
 
-    print_section("test")
-    compare_ids(
-        "test_input",
-        data["test_input"]["sample_id"],
-        "sample_submission",
-        submission_ids,
-    )
-    compare_ids(
-        "test_input",
-        data["test_input"]["sample_id"],
-        "meta(test)",
-        meta.loc[meta["split"] == "test", "sample_id"],
-    )
+    expected = test["minute"].drop_duplicates().sort_values().reset_index(drop=True)
 
-    print_section("train / test overlap")
-    shared = set(data["train_input"]["sample_id"]) & set(
-        data["test_input"]["sample_id"]
+    structure_check = test.groupby("sample_id")["minute"].apply(
+        lambda x: (
+            x.drop_duplicates().sort_values().reset_index(drop=True).equals(expected)
+        )
     )
-    print("sample_ids in both train and test:", len(shared))
+    duplicate_count = test.duplicated(subset=["sample_id", "minute"]).sum()
+    print("\nDuplicate combinations: ", duplicate_count)
+    print("All IDs have the same structure: ", structure_check.all())
+    print("IDs with different structure: ", (~structure_check).sum())
+    print(test[test["sample_id"] == structure_check.index[0]].to_string(index=False))
+
+    print("\n---missing_per_id---")
+    missing_per_id = test.groupby("sample_id")[SIGNALS].apply(lambda g: g.isna().sum())
+    window_len = test.groupby("sample_id").size().max()
+    print(
+        "missing_per_id > 0 :\n", (missing_per_id > 0).sum()
+    )  # windows with any gap, per signal
+    print(
+        "missing_per_id == window length :\n", (missing_per_id == window_len).sum()
+    )  # windows where a signal is entirely missing
+
+    # The last minute is what persistence and most features lean on.
+    last_minute = test.loc[test["minute"] == test["minute"].max(), SIGNALS]
+    print("missing at the last minute :\n", last_minute.isna().sum())
+
+    print(missing_per_id.loc[(missing_per_id != 0).sum(axis=1).eq(1)])
+    print(missing_per_id.loc[(missing_per_id != 0).sum(axis=1).ge(2)])
 
 
 # %%
-# 7. Overlapping windows within a case
-def report_window_overlap(train_input: pd.DataFrame, target: pd.DataFrame) -> None:
-    clock = add_case_clock(train_input)
+def check_id_name(sample: pd.DataFrame, parquet: pd.DataFrame):
+    sample_id = sample["sample_id"].unique()
+    parquet_id = parquet["sample_id"].unique()
 
-    print_section("window spacing within a case")
-    ends = clock.drop_duplicates("sample_id")[["caseid", "end"]].sort_values(
-        ["caseid", "end"]
+    sample_only = np.setdiff1d(sample_id, parquet_id)
+    parquet_only = np.setdiff1d(parquet_id, sample_id)
+
+    if len(sample_only) == 0 and len(parquet_only) == 0:
+        print("Both files have the same IDs.")
+    else:
+        print("The IDs are different.")
+        print("IDs only in sample:", len(sample_only), "/", len(sample_id))
+        print(sample_only[:10])
+        print("IDs only in parquet:", len(parquet_only), "/", len(parquet_id))
+        print(parquet_only[:10])
+
+
+# %%
+OVERLAP_PATTERN = r"(?P<case>c\d+)_o(?P<end>\d+)"
+
+
+def check_overlap(standard: pd.DataFrame, target: pd.DataFrame) -> pd.DataFrame:
+    """Check whether a window's future target shows up in another window's input of the same case."""
+    key = target["sample_id"].str.extract(OVERLAP_PATTERN)
+    last_minute = target.groupby("sample_id")["minute"].transform("max")
+    # Assumes o### is the case-level minute of the window's last row
+    case_clock = (
+        target.assign(
+            case=key["case"],
+            t=key["end"].astype(int) - (last_minute - target["minute"]),
+        )
+        .melt(
+            id_vars=["case", "t"],
+            value_vars=SIGNALS,
+            var_name="variable",
+            value_name="observed",
+        )
+        .dropna()
+        .drop_duplicates(["case", "t", "variable"])
+    )
+
+    ends = (
+        target.assign(case=key["case"], end=key["end"].astype(int))
+        .drop_duplicates("sample_id")
+        .sort_values(["case", "end"])
     )
     print("gap between consecutive window ends (minutes):")
-    print(ends.groupby("caseid")["end"].diff().value_counts().head().to_string())
+    print(ends.groupby("case")["end"].diff().value_counts().head())
 
-    long = clock.melt(
-        id_vars=["caseid", "t"],
-        value_vars=SIGNALS,
-        var_name="variable",
-        value_name="observed",
-    ).dropna()
-    n_values = long.groupby(["caseid", "t", "variable"])["observed"].nunique()
-    print(
-        "\nrepeat observations of the same case-minute:",
-        int((long.duplicated(["caseid", "t", "variable"])).sum()),
+    key = standard["sample_id"].str.extract(OVERLAP_PATTERN)
+    future = standard.assign(
+        case=key["case"], t=key["end"].astype(int) + standard["horizon"]
     )
-    print("of those, with conflicting values:", int((n_values > 1).sum()))
-    case_minutes = long.drop_duplicates(["caseid", "t", "variable"])
-    print("distinct case-minutes:", clock.drop_duplicates(["caseid", "t"]).shape[0])
+    m = future.merge(case_clock, on=["case", "t", "variable"], how="left")
+    m["found"] = m["observed"].notna()
+    m["identical"] = np.isclose(m["value"], m["observed"])
 
-    print_section("targets visible in another window's input")
-    key = target["sample_id"].str.extract(TRAIN_ID_PATTERN).astype(int)
-    future = target.assign(caseid=key["caseid"], t=key["end"] + target["horizon"])
-    merged = future.merge(case_minutes, on=["caseid", "t", "variable"], how="left")
-    merged["found"] = merged["observed"].notna()
-    merged["identical"] = np.isclose(merged["value"], merged["observed"])
-    print("share found:")
+    print("\nshare of targets found in another window:")
     print(
-        merged.pivot_table(
+        m.pivot_table(
             index="variable", columns="horizon", values="found", aggfunc="mean"
-        )
-        .round(3)
-        .to_string()
+        ).round(3)
     )
-    print("\nshare identical, among found:")
+    print("\nof those, share with an identical value:")
     print(
-        merged[merged["found"]]
+        m[m["found"]]
         .pivot_table(
             index="variable", columns="horizon", values="identical", aggfunc="mean"
         )
         .round(3)
-        .to_string()
     )
+    return m
 
 
 # %%
-# 8. Train vs test distribution
-def report_train_test_shift(data: dict[str, pd.DataFrame]) -> None:
-    meta = add_split(data["meta"])
-
-    print_section("meta")
-    print(meta.groupby("split")["age"].describe().round(1).to_string())
+def report_train_test_shift(
+    meta: pd.DataFrame, train_in: pd.DataFrame, test_in: pd.DataFrame
+):
+    split = meta["sample_id"].str[0].map({"c": "train", "t": "test"})
+    print("---age---")
+    print(meta.groupby(split)["age"].describe().round(1))
     for col in ["sex", "department"]:
-        print()
-        print(
-            pd.crosstab(meta[col], meta["split"], normalize="columns")
-            .round(3)
-            .to_string()
-        )
+        print(f"\n---{col}---")
+        print(pd.crosstab(meta[col], split, normalize="columns").round(3))
 
-    print_section("signals")
-    both = pd.concat(
-        [
-            data["train_input"].assign(split="train"),
-            data["test_input"].assign(split="test"),
-        ]
-    )
-    print("missing row ratio:")
+    print("\n---missing row ratio---")
     print(
-        both.groupby("split")[SIGNALS]
-        .apply(lambda g: g.isna().mean())
-        .round(4)
-        .to_string()
+        pd.DataFrame(
+            {
+                "train": train_in[SIGNALS].isna().mean(),
+                "test": test_in[SIGNALS].isna().mean(),
+            }
+        ).round(4)
     )
-    print("\nmean:")
-    print(both.groupby("split")[SIGNALS].mean().round(2).to_string())
 
 
 # %%
-# 9. Small processed files used by other scripts
-def save_processed(data: dict[str, pd.DataFrame]) -> None:
-    PROCESS_DIR.mkdir(parents=True, exist_ok=True)
-    parse_submission_id(data["sample"]).to_csv(SAVE_SUBMISSION_ID, index=False)
-    add_split(data["meta"]).to_csv(SAVE_META, index=False)
-    print(f"Saved {SAVE_SUBMISSION_ID.relative_to(PROJECT_ROOT)}")
-    print(f"Saved {SAVE_META.relative_to(PROJECT_ROOT)}")
-
-
-# %%
-def main() -> None:
-    data = load_raw()
-
-    for name in ["train_target", "train_input", "test_input", "meta", "sample"]:
-        print_header(f"{name}: common")
-        report_common(data[name])
-
-    print_header("train_input: windows")
-    report_input(data["train_input"])
-    print_header("test_input: windows")
-    report_input(data["test_input"])
-    print_header("train_target")
-    report_target(data["train_target"])
-    print_header("sample_submission")
-    report_submission(data["sample"])
-    print_header("case_metadata")
-    report_meta(data["meta"])
-    print_header("ID consistency across files")
-    report_id_consistency(data)
-    print_header("Window overlap (train)")
-    report_window_overlap(data["train_input"], data["train_target"])
-    print_header("Train vs test")
-    report_train_test_shift(data)
-    print_header("Save")
-    save_processed(data)
-
-
 if __name__ == "__main__":
-    main()
+    print_header("train")
+    report_common(train)
+    report_train_target(train)
+
+    print_header("sample")
+    report_common(sample)
+    parsed = report_sample_id_structure(sample, build_sample_id(sample))
+
+    print_header("meta")
+    report_common(meta)
+    meta_filled = fillna_meta(meta)
+    report_meta(meta_filled)
+
+    print_header("train_parquet")
+    report_common(train_parquet)
+    check_structure_parquet(train_parquet)
+
+    print_header("test_parquet")
+    report_common(test_parquet)
+    check_structure_parquet(test_parquet)
+
+    print_header("ID check")
+    test_meta = meta[meta["sample_id"].str.startswith("t")]
+    train_meta = meta[meta["sample_id"].str.startswith("c")]
+    print("[test_parquet vs sample]")
+    check_id_name(parsed, test_parquet)
+    print("[test_parquet vs meta(test)]")
+    check_id_name(test_meta, test_parquet)
+    print("[train_parquet vs train_target]")
+    check_id_name(train, train_parquet)
+    print("[train_parquet vs meta(train)]")
+    check_id_name(train_meta, train_parquet)
+
+    print_header("overlap")
+    check_overlap(train, train_parquet)
+
+    print_header("train vs test")
+    report_train_test_shift(meta, train_parquet, test_parquet)
+
+    PROCESS.mkdir(parents=True, exist_ok=True)
+    parsed.to_csv(SAVE, index=False)
+    meta_filled.to_csv(SAVE_META, index=False)

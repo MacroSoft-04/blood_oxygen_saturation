@@ -8,19 +8,17 @@ by how much it improves on these numbers.
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib import font_manager
 
-from check import (
-    PROJECT_ROOT,
+from common import (
+    OUTPUT_DIR,
     SAMPLE_SUBMISSION,
     SIGNALS,
     TEST_INPUT,
     TRAIN_INPUT,
     TRAIN_TARGET,
     parse_submission_id,
+    set_korean_font,
 )
-
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
 
 # %%
@@ -104,21 +102,6 @@ def report_persistence(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # %%
-def set_korean_font() -> None:
-    available = {f.name for f in font_manager.fontManager.ttflist}
-    for name in [
-        "Malgun Gothic",
-        "AppleGothic",
-        "NanumGothic",
-        "Noto Sans CJK KR",
-        "Noto Sans CJK JP",
-    ]:
-        if name in available:
-            plt.rcParams["font.family"] = name
-            break
-    plt.rcParams["axes.unicode_minus"] = False
-
-
 def plot_persistence_mae(mae: pd.DataFrame, path) -> None:
     set_korean_font()
     variables = mae.index.tolist()
