@@ -3,3 +3,5 @@
 .vscode/
 data/*
 !data/README.md
+outputs/
+__pycache__/
